@@ -1,0 +1,66 @@
+name: CI Validation
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: 20
+
+    - name: Check plugin changes count and version bump
+      run: |
+        if [ "${{ github.event_name }}" = "pull_request" ]; then
+          BASE_SHA="${{ github.event.pull_request.base.sha }}"
+          TARGET_SHA="HEAD"
+        else
+          if [ "${{ github.event.before }}" = "0000000000000000000000000000000000000000" ] || [ -z "${{ github.event.before }}" ]; then
+            BASE_SHA="HEAD~1"
+          else
+            BASE_SHA="${{ github.event.before }}"
+          fi
+          TARGET_SHA="HEAD"
+        fi
+
+        CHANGED_FILES=$(git diff --name-only $BASE_SHA $TARGET_SHA || true)
+        
+        CHANGED_PLUGIN_FILES=$(echo "$CHANGED_FILES" | grep -E '^[Pp]lugins/.+\.plugin\.js$' || true)
+        
+        if [ -z "$CHANGED_PLUGIN_FILES" ]; then
+          PLUGIN_COUNT=0
+        else
+          PLUGIN_COUNT=$(echo "$CHANGED_PLUGIN_FILES" | grep -v "^$" | wc -l | tr -d ' ')
+        fi
+        
+        if [ "$PLUGIN_COUNT" -gt 1 ]; then
+          echo "::error::❌ CI FAILED: Detected changes in multiple *.plugin.js files at once!"
+          echo "$CHANGED_PLUGIN_FILES" | sed 's/^/  - /'
+          exit 1
+        fi
+        
+        if [ "$PLUGIN_COUNT" -eq 1 ]; then
+          PLUGIN_FILE=$(echo "$CHANGED_PLUGIN_FILES" | grep -v "^$" | head -n 1)
+          
+          VERSION_CHANGED=$(git diff $BASE_SHA $TARGET_SHA -- "$PLUGIN_FILE" | grep -E '^\+[[:space:]]*\*[[:space:]]*@version' || true)
+          
+          if [ -z "$VERSION_CHANGED" ]; then
+            echo "::error file=$PLUGIN_FILE::❌ CI FAILED: The *.plugin.js file was modified, but the @version string was not incremented!"
+            exit 1
+          fi
+          echo "✅ Version bump detected for $PLUGIN_FILE: $VERSION_CHANGED"
+        fi
+        
+        echo "✅ Validation passed. Modified *.plugin.js count: $PLUGIN_COUNT"
