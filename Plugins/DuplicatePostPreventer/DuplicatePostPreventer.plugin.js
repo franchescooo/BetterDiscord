@@ -2,7 +2,7 @@
  * @name DuplicatePostPreventer
  * @author Happywezer
  * @description Block re-sharing posts
- * @version 1.2.0
+ * @version 1.2.1
  */
 
 module.exports = class DuplicatePostPreventer {
@@ -36,6 +36,7 @@ module.exports = class DuplicatePostPreventer {
 
 	stop() {
 		this.removeWarning();
+		this.removeAllOptimisticMessages();
 		this.isBackgroundSearchingNow = false;
 		BdApi.Patcher.unpatchAll("DuplicatePostPreventer");
 		BdApi.DOM.removeStyle("DuplicatePostPreventer");
@@ -406,6 +407,13 @@ module.exports = class DuplicatePostPreventer {
 		const node = this.optimisticMessages.get(optimisticId);
 		if (node?.isConnected) node.remove();
 		this.optimisticMessages.delete(optimisticId);
+	}
+
+	removeAllOptimisticMessages() {
+		this.optimisticMessages.forEach(node => {
+			if (node?.isConnected) node.remove();
+		});
+		this.optimisticMessages.clear();
 	}
 
 	showWarning(onForceSubmit) {
