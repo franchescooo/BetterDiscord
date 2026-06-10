@@ -1,8 +1,8 @@
 /**
  * @name DuplicatePostPreventer
  * @author Happywezer
- * @description Block re-sharing posts from X/Pixiv
- * @version 1.1.0
+ * @description Block re-sharing posts
+ * @version 1.2.0
  */
 
 module.exports = class DuplicatePostPreventer {
@@ -10,6 +10,7 @@ module.exports = class DuplicatePostPreventer {
 		this.settings = { cooldownMs: 3000, waitingTimeMs: 3000, isDebug: true, isShowToasts: true };
 		this.lastSearchTime = 0;
 		this.isBackgroundSearchingNow = false;
+		this.optimisticMessages = new Map();
 	}
 
 	async start() {
@@ -158,20 +159,32 @@ module.exports = class DuplicatePostPreventer {
 				return Promise.resolve({ shouldNavigate: false });
 			}
 
+			const optimisticId = this.injectOptimisticMessage(content);
 			const hasDuplicate = await this.waitForEndOfSearching();
 			this.isBackgroundSearchingNow = false;
 
 			if (hasDuplicate) {
-				this.showWarning(() => {
-					try {
-						originalFunc.apply(instance, args);
-					} finally {
-						this.removeWarning();
-					}
+				this.markOptimisticMessageBlocked(optimisticId);
+
+				const shouldSend = await new Promise(resolve => {
+					const timeoutId = setTimeout(() => resolve(false), 3000);
+
+					this.showWarning(() => {
+						clearTimeout(timeoutId);
+						resolve(true);
+					});
 				});
-				return Promise.resolve({ shouldNavigate: false });
+
+				this.removeOptimisticMessage(optimisticId);
+				this.removeWarning();
+
+				if (!shouldSend) return Promise.resolve({ shouldNavigate: false });
+
+				this.removeOptimisticMessage(optimisticId);
+				return originalFunc.apply(instance, args);
 			}
 
+			this.removeOptimisticMessage(optimisticId);
 			return originalFunc.apply(instance, args);
 		});
 	}
@@ -260,9 +273,7 @@ module.exports = class DuplicatePostPreventer {
 			`
 				.dup-preventer-setting-row { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; }
 				.dup-preventer-setting-row:last-child { margin-bottom: 0; }
-
 				.dup-preventer-warning-container { background-color: var(--status-danger); color: #fff; padding: 8px 16px; border-radius: 8px; margin-bottom: 8px; display: flex; justify-content: space-between; align-items: center; font-size: 14px; font-family: var(--font-primary); font-weight: 500; box-shadow: var(--elevation-low); }
-
 				.dup-preventer-control-box { width: 90px; height: 40px; box-sizing: border-box; }
 				.dup-preventer-input { background-color: var(--background-floating, #111214); color: var(--text-normal); border: 1px solid transparent; border-radius: 4px; padding: 0 10px; text-align: center; font-family: inherit; font-size: 14px; outline: none; width: 100%; height: 100%; box-sizing: border-box; transition: border-color .15s ease; }
 				.dup-preventer-input:focus { border-color: var(--brand-experiment, #5865F2); }
@@ -275,13 +286,126 @@ module.exports = class DuplicatePostPreventer {
 				.dup-preventer-slider:before { position: absolute; content: ""; height: 16px; width: 16px; left: 3px; bottom: 3px; background-color: white; transition: .15s ease; border-radius: 50%; }
 				input:checked + .dup-preventer-slider { background-color: var(--brand-experiment, #5865F2); }
 				input:checked + .dup-preventer-slider:before { transform: translateX(18px); }
+				.dup-preventer-optimistic-message { list-style: none; margin: 8px 16px; opacity: .55; animation: dup-preventer-fade-in .15s ease; }
+				.dup-preventer-optimistic-content { max-width: 520px;	padding: 10px 14px;	border-radius: 12px;	background: var(--background-secondary);	border: 1px solid var(--background-modifier-accent); }
+				.dup-preventer-optimistic-text { color: var(--text-normal); word-break: break-word; }
+				.dup-preventer-optimistic-status { margin-top: 4px; font-size: 12px; color: var(--text-muted); }
+				.dup-preventer-optimistic-blocked { opacity: .9; }
+				.dup-preventer-optimistic-blocked
+				.dup-preventer-optimistic-content { background: rgba(240, 71, 71, 0.15); border-color: rgba(240, 71, 71, 0.5); }
+				@keyframes dup-preventer-fade-in { from { opacity: 0; transform: translateY(4px); } to { opacity: .55; transform: translateY(0); } }
+				.dup-preventer-status-container { display: flex; align-items: center; gap: 6px; margin-top: 4px; font-size: 12px; color: var(--text-muted); }
+				.dup-preventer-spinner { width: 10px; height: 10px; border: 2px solid currentColor; border-right-color: transparent; border-radius: 50%; flex-shrink: 0; animation: dup-preventer-spin .8s linear infinite; }
+				@keyframes dup-preventer-spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+				.dup-preventer-blocked-message { opacity: .85; }
+				.dup-preventer-blocked-message .dup-preventer-pending-status { color: var(--status-danger); font-weight: 500; }
+				.dup-preventer-block-icon { flex-shrink: 0; }
 			`,
 		);
 	}
 
-	removeWarning() {
-		const existingWarning = document.getElementById("dup-preventer-warning");
-		if (existingWarning) existingWarning.remove();
+	injectOptimisticMessage(content) {
+		const messagesList = document.querySelector('[data-list-id="chat-messages"]');
+		if (!messagesList) {
+			this.settings.isDebug && console.warn("[DuplicatePostPreventer] Messages list not found");
+			return null;
+		}
+		const messages = [...messagesList.children].reverse();
+
+		const template =
+			messages.find(node => node instanceof HTMLElement && node.matches("li") && node.querySelector("[id^='message-content-']")) ??
+			messages[0];
+
+		if (!template) {
+			this.settings.isDebug && console.warn("[DuplicatePostPreventer] Failed to find message template");
+			return null;
+		}
+
+		const optimisticId = `dup-preventer-${Date.now()}`;
+
+		const clone = template.cloneNode(true);
+		clone.dataset.optimisticId = optimisticId;
+		clone.dataset.optimisticMessage = "true";
+		clone.dataset.isSelf = "true";
+		clone.classList.add("dup-preventer-optimistic-message");
+		clone.removeAttribute("id");
+		clone.removeAttribute("data-author-id");
+		clone.querySelectorAll("[class*='reaction']").forEach(el => {
+			el.remove();
+		});
+		clone.querySelectorAll("[class*='embed']").forEach(el => {
+			el.remove();
+		});
+		clone.querySelectorAll("[class*='repliedMessage']").forEach(el => {
+			el.remove();
+		});
+		clone.querySelectorAll("[id^='message-accessories']").forEach(el => {
+			el.remove();
+		});
+		clone.querySelectorAll("[id]").forEach(el => {
+			el.removeAttribute("id");
+		});
+		clone.querySelectorAll("[aria-labelledby]").forEach(el => {
+			el.removeAttribute("aria-labelledby");
+		});
+		const buttonContainer = clone.querySelector("[class*='buttonContainer'");
+		if (buttonContainer) buttonContainer.remove();
+		let contentNode = clone.querySelector("[class*='messageContent']");
+		if (!contentNode) {
+			const contentsContainer = clone.querySelector("[class*='contents']");
+			if (!contentsContainer) {
+				this.settings.isDebug && console.warn("[DuplicatePostPreventer] Failed to create content container");
+				return null;
+			}
+			contentNode = document.createElement("div");
+			contentsContainer.appendChild(contentNode);
+			this.settings.isDebug && console.log("[DuplicatePostPreventer] Created fallback message-content node");
+		}
+		contentNode.textContent = "";
+		contentNode.textContent = content;
+
+		const statusContainer = document.createElement("div");
+		statusContainer.className = "dup-preventer-status-container";
+
+		statusContainer.innerHTML = `
+			<span class="dup-preventer-spinner"></span>
+			<span class="dup-preventer-pending-status">
+				Checking for duplicates...
+			</span>
+		`;
+		contentNode.insertAdjacentElement("afterend", statusContainer);
+
+		messagesList.insertBefore(clone, messagesList.lastElementChild);
+		clone.scrollIntoView({
+			block: "end",
+			behavior: "smooth",
+		});
+		this.optimisticMessages.set(optimisticId, clone);
+		return optimisticId;
+	}
+
+	markOptimisticMessageBlocked(optimisticId) {
+		const node = this.optimisticMessages.get(optimisticId);
+		if (!node) return;
+
+		node.classList.remove("dup-preventer-optimistic-message");
+		node.classList.add("dup-preventer-blocked-message");
+
+		const statusContainer = node.querySelector(".dup-preventer-status-container");
+		if (!statusContainer) return;
+
+		statusContainer.innerHTML = `
+			<span class="dup-preventer-block-icon">⚠️</span>
+			<span class="dup-preventer-pending-status">
+				Duplicate detected
+			</span>
+		`;
+	}
+
+	removeOptimisticMessage(optimisticId) {
+		const node = this.optimisticMessages.get(optimisticId);
+		if (node?.isConnected) node.remove();
+		this.optimisticMessages.delete(optimisticId);
 	}
 
 	showWarning(onForceSubmit) {
@@ -312,6 +436,11 @@ module.exports = class DuplicatePostPreventer {
 		};
 
 		chatForm.prepend(warningDiv);
+	}
+
+	removeWarning() {
+		const existingWarning = document.getElementById("dup-preventer-warning");
+		if (existingWarning) existingWarning.remove();
 	}
 
 	getSettingsPanel() {
