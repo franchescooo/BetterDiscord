@@ -2,7 +2,7 @@
  * @name DuplicatePostPreventer
  * @author Happywezer
  * @description Block re-sharing posts
- * @version 1.2.1
+ * @version 1.2.2
  */
 
 module.exports = class DuplicatePostPreventer {
@@ -11,6 +11,7 @@ module.exports = class DuplicatePostPreventer {
 		this.lastSearchTime = 0;
 		this.isBackgroundSearchingNow = false;
 		this.optimisticMessages = new Map();
+		this.lastSection = undefined;
 	}
 
 	async start() {
@@ -50,24 +51,19 @@ module.exports = class DuplicatePostPreventer {
 		this.searchMessageStore = BdApi.Webpack.getStore("SearchMessageStore");
 		this.selectedGuildStore = BdApi.Webpack.getStore("SelectedGuildStore");
 		this.selectedChannelStore = BdApi.Webpack.getStore("SelectedChannelStore");
-		this.channelStoreModule = BdApi.Webpack.getByKeys("getChannel", "hasChannel");
+		this.channelStore = BdApi.Webpack.getByKeys("getChannel", "hasChannel");
 		this.messageActionsModule = BdApi.Webpack.getByKeys("sendMessage", "editMessage");
 		this.langFilterMap = BdApi.Webpack.getModule(m => typeof m.FILTER_IN === "object", { searchExports: true });
-
-		const renderSidebarModuleRaw = BdApi.Webpack.getModule(m => m?.type?.toString?.()?.includes?.("getSidebarState"), {
-			searchExports: true,
-			raw: true,
-		});
-		this.renderSidebarModule = Object.values(renderSidebarModuleRaw?.declarations ?? {}).find(val => val?.prototype?.renderSidebar);
+		this.channelSectionStore = BdApi.Webpack.getStore("ChannelSectionStore");
 
 		return [
 			this.searchModule,
-			this.renderSidebarModule,
+			this.channelSectionStore,
 			this.searchSidebarModule,
 			this.searchMessageStore,
 			this.selectedGuildStore,
 			this.selectedChannelStore,
-			this.channelStoreModule,
+			this.channelStore,
 			this.messageActionsModule,
 			this.langFilterMap,
 		];
@@ -90,12 +86,12 @@ module.exports = class DuplicatePostPreventer {
 					this.settings.isDebug &&
 						console.error("[DuplicatePostPreventer] Failed to find required Discord modules.", {
 							hasSearchModule: !!this.searchModule,
-							hasrenderSidebarModule: !!this.renderSidebarModule,
+							hasChannelSectionStore: !!this.channelSectionStore,
 							hasSearchSidebarModule: !!this.searchSidebarModule,
 							hasSearchMessageStore: !!this.searchMessageStore,
 							hasSelectedGuildStore: !!this.selectedGuildStore,
 							hasSelectedChannelStore: !!this.selectedChannelStore,
-							hasChannelStoreModule: !!this.channelStoreModule,
+							hasChannelStore: !!this.channelStore,
 							hasMessageActionsModule: !!this.messageActionsModule,
 							hasLangFilterMap: !!this.langFilterMap,
 						});
@@ -112,14 +108,10 @@ module.exports = class DuplicatePostPreventer {
 	}
 
 	patchSidebarModule() {
-		BdApi.Patcher.instead("DuplicatePostPreventer", this.searchSidebarModule, "setSidebarOpen", (instance, args, originalFunc) => {
-			if (this.isBackgroundSearchingNow) return;
-			originalFunc.apply(instance, args);
-		});
-
-		BdApi.Patcher.instead("DuplicatePostPreventer", this.renderSidebarModule.prototype, "renderSidebar", (instance, args, originalFunc) => {
-			if (this.isBackgroundSearchingNow) return;
-			originalFunc.apply(instance, args);
+		BdApi.Patcher.after("DuplicatePostPreventer", this.channelSectionStore, "getSection", (_instance, _args, result) => {
+			if (result !== "SEARCH") this.lastSection = result;
+			if (result === "SEARCH" && this.isBackgroundSearchingNow) return this.lastSection ?? result;
+			return result;
 		});
 	}
 
@@ -194,7 +186,7 @@ module.exports = class DuplicatePostPreventer {
 		this.settings.isDebug && console.log("[DuplicatePostPreventer] Starting duplicate search...");
 
 		const guildId = this.selectedGuildStore.getGuildId();
-		const channel = this.channelStoreModule.getChannel(channelId);
+		const channel = this.channelStore.getChannel(channelId);
 
 		if (!channel) {
 			this.settings.isDebug && console.warn("[DuplicatePostPreventer] Channel not found:", channelId);
